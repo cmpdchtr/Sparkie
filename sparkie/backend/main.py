@@ -144,3 +144,9 @@ async def get_active_keys(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(ApiKey.key).where(ApiKey.is_active == True))
     keys = result.scalars().all()
     return keys
+
+@app.get("/api/v1/keys/stats")
+async def get_keys_stats():
+    """Returns usage statistics for the in-memory keys."""
+    return sparkie_client.get_stats()
+

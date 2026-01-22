@@ -41,6 +41,19 @@ class SparkieClient:
         random.shuffle(self._active_keys)
         print(f"[Sparkie] Loaded {len(self._active_keys)} keys.")
 
+    def get_stats(self) -> List[Dict]:
+        """Returns statistics for all managed keys."""
+        stats = []
+        for k, v in self._keys.items():
+            stats.append({
+                "key_preview": f"{k[:10]}...",
+                "usage_count": v.usage_count,
+                "consecutive_errors": v.consecutive_errors,
+                "last_used_timestamp": v.last_used,
+                "is_active": v.is_active
+            })
+        return stats
+
     def _get_next_key(self) -> str:
         """
         Smart selection strategy:
