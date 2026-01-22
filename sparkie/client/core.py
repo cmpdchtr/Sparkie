@@ -15,16 +15,31 @@ class KeyStats:
 
 class SparkieClient:
     def __init__(self, api_keys: List[str], model_name: str = "gemini-pro"):
-        if not api_keys:
-            raise ValueError("At least one API key is required")
-        
-        self._keys: Dict[str, KeyStats] = {k: KeyStats(k) for k in api_keys}
-        self._active_keys: List[str] = list(self._keys.keys())
         self._model_name = model_name
         self._lock = asyncio.Lock()
+        self.update_keys(api_keys)
+
+    def update_keys(self, api_keys: List[str]):
+        """Updates the internal key pool dynamically."""
+        if not api_keys:
+            # If no keys provided, we can either raise or set empty. 
+            # Ideally logs a warning.
+            self._keys = {}
+            self._active_keys = []
+            return
+
+        # Preserve stats for existing keys, add new ones
+        new_keys_dict = {}
+        for k in api_keys:
+            if hasattr(self, "_keys") and k in self._keys:
+                new_keys_dict[k] = self._keys[k]
+            else:
+                new_keys_dict[k] = KeyStats(k)
         
-        # Shuffle initially to prevent thundering herd if multiple instances start
+        self._keys = new_keys_dict
+        self._active_keys = list(self._keys.keys())
         random.shuffle(self._active_keys)
+        print(f"[Sparkie] Loaded {len(self._active_keys)} keys.")
 
     def _get_next_key(self) -> str:
         """
@@ -92,6 +107,9 @@ class SparkieClient:
         """
         Wrapper for gemini.generate_content that rotates keys on failure.
         """
+        if not self._active_keys:
+             raise RuntimeError("No API keys available in Sparkie. Please upload account cookies to generate keys.")
+
         attempts = 0
         max_attempts = len(self._active_keys) * 2 # Allow cycling twice through all keys
 

@@ -2,7 +2,7 @@ import json
 import asyncio
 from typing import Dict, List
 from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
 
 class CloudAutomator:
     """
@@ -32,7 +32,8 @@ class CloudAutomator:
             )
             
             # Apply stealth scripts to evade basic bot detection
-            await stealth_async(context)
+            stealth = Stealth()
+            await stealth.apply_stealth_async(context)
             
             # 1. Load Cookies
             await context.add_cookies(cookies)

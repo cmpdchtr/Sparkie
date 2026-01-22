@@ -7,8 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import init_db, AsyncSessionLocal, GoogleAccount, CloudProject, ApiKey
 from .automation import CloudAutomator
+from ..client.core import SparkieClient
 
-app = FastAPI(title="Sparkie Backend")
+app = FastAPI(title="Sparkie Backend & Gateway")
+
+# Global Client Instance
+sparkie_client = SparkieClient(api_keys=[])
 
 # Pydantic Models
 class AccountUpload(BaseModel):
@@ -19,14 +23,43 @@ class KeyResponse(BaseModel):
     key: str
     project_id: str
 
+class ChatRequest(BaseModel):
+    prompt: str
+    stream: bool = False
+
 # Dependency
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
 
+async def reload_keys(db: AsyncSession):
+    """Reloads keys from DB into the running client."""
+    result = await db.execute(select(ApiKey.key).where(ApiKey.is_active == True))
+    keys = result.scalars().all()
+    sparkie_client.update_keys(keys)
+
 @app.on_event("startup")
 async def startup():
     await init_db()
+    # Initial Key Load
+    async with AsyncSessionLocal() as db:
+        await reload_keys(db)
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatRequest):
+    """
+    Proxy endpoint for AI generation. 
+    Uses internal SparkieClient for rotation and fault tolerance.
+    """
+    try:
+        # Note: In a real app, map 'request' parameters to gemini params properly
+        response = await sparkie_client.generate_content(request.prompt)
+        return {
+            "text": response.text,
+            "backend_model": "gemini-pro"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 @app.post("/accounts/upload")
 async def upload_account(payload: AccountUpload, db: AsyncSession = Depends(get_db)):
@@ -79,6 +112,9 @@ async def run_generation_task(account_id: int):
             account.project_count += 1
             await db.commit()
             print(f"Key generated successfully: {result_data['api_key'][:10]}...")
+            
+            # Refresh Global Client
+            await reload_keys(db)
 
         except Exception as e:
             print(f"Automation failed: {e}")
@@ -95,6 +131,12 @@ async def trigger_generation(email: str, background_tasks: BackgroundTasks, db: 
         
     background_tasks.add_task(run_generation_task, account.id)
     return {"status": "queued", "message": "Key generation started in background"}
+
+@app.post("/admin/refresh-keys")
+async def manual_refresh(db: AsyncSession = Depends(get_db)):
+    """Force reloads keys from DB into memory."""
+    await reload_keys(db)
+    return {"status": "refreshed", "active_keys_count": len(sparkie_client._active_keys)}
 
 @app.get("/keys", response_model=List[str])
 async def get_active_keys(db: AsyncSession = Depends(get_db)):

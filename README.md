@@ -1,41 +1,58 @@
 # Sparkie
 
-Fault-tolerant layer for Google Gemini API with smart rate-limit handling and automated infrastructure management.
+Fault-tolerant Gateway Service for Google Gemini API with smart rate-limit handling and automated infrastructure management.
 
 ## Project Structure
 
-- `sparkie/client/`: Python library for using Gemini with key rotation.
-- `sparkie/backend/`: FastAPI service for managing keys and automating GCP via Playwright.
+- `sparkie/backend/`: The main FastAPI service that acts as both the AI Gateway and Infrastructure Manager.
+- `sparkie/client/`: Internal library used by the backend for smart key rotation.
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
 playwright install
+pip install playwright-stealth
 ```
 
-## Running the Backend
+## Running the Service
 
 ```bash
-     sparkie.backend.main:app --reload
+uvicorn sparkie.backend.main:app --reload
 ```
 
-## Using the Client
+## API Usage
 
-```python
-import asyncio
-from sparkie.client.core import SparkieClient
+### 1. Upload Account (Admin)
+Send cookies from a fresh browser session (use EditThisCookie extension to export).
 
-async def main():
-    # Load keys from backend endpoint or config
-    keys = ["KEY_1", "KEY_2", "KEY_3"]
-    
-    client = SparkieClient(api_keys=keys)
-    response = await client.generate_content("Hello, world!")
-    print(response.text)
+```http
+POST /accounts/upload
+Content-Type: application/json
 
-if __name__ == "__main__":
-    asyncio.run(main())
+{
+  "email": "user@gmail.com",
+  "cookies": [{...}, {...}]
+}
+```
+
+### 2. Generate Keys & Infrastructure (Admin)
+Triggers background automation to create project and key.
+
+```http
+POST /generate-key/user@gmail.com
+```
+
+### 3. Chat with AI (User)
+The service balances this request across all available keys.
+
+```http
+POST /v1/chat/completions
+Content-Type: application/json
+
+{
+  "prompt": "Explain Quantum Computing"
+}
 ```
 
 ## Legal Warning
