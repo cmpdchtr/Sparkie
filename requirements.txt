@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+aiosqlite
+playwright
+playwright-stealth
+google-generativeai
+pydantic
+python-dotenv
+asyncpg
