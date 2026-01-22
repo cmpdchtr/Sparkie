@@ -1,4 +1,7 @@
 import json
+import asyncio
+import sys
+import threading
 from typing import List, Dict
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -77,8 +80,23 @@ async def upload_account(payload: AccountUpload, db: AsyncSession = Depends(get_
         new_account = GoogleAccount(email=payload.email, cookies_json=cookies_str)
         db.add(new_account)
     
-    await db.commit()
-    return {"status": "stored", "email": payload.email}
+def run_automation_in_thread(cookies: List[Dict], headless: bool) -> Dict:
+    """
+    Runs Playwright interactions in a separate thread with a ProactorEventLoop on Windows.
+    This bypasses Uvicorn's potential SelectorEventLoop usage which breaks subprocesses.
+    """
+    loop = asyncio.new_event_loop()
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    asyncio.set_event_loop(loop)
+    
+    automator = CloudAutomator(headless=headless)
+    
+    try:
+        return loop.run_until_complete(automator.create_project_and_key(cookies))
+    finally:
+        loop.close()
 
 async def run_generation_task(account_id: int):
     """Background task to run Playwright automation."""
@@ -90,12 +108,13 @@ async def run_generation_task(account_id: int):
         if not account or not account.is_active:
             return
 
-        automator = CloudAutomator(headless=True)
         try:
             cookies = json.loads(account.cookies_json)
             print(f"Starting automation for {account.email}")
             
-            result_data = await automator.create_project_and_key(cookies)
+            # Offload blocking IO (thread creation + automation) to a thread
+            # that manages its own robust Event Loop
+            result_data = await asyncio.to_thread(run_automation_in_thread, cookies, True)
             
             # Save results
             new_project = CloudProject(

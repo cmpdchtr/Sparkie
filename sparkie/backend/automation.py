@@ -14,6 +14,40 @@ class CloudAutomator:
     def __init__(self, headless: bool = False):
         self.headless = headless
 
+    def _sanitize_cookies(self, cookies: List[Dict]) -> List[Dict]:
+        """Cleans and maps cookies from EditThisCookie format to Playwright."""
+        sanitized = []
+        for c in cookies:
+            sc = c.copy()
+            # 1. Remap expirationDate -> expires
+            if "expirationDate" in sc:
+                sc["expires"] = sc.pop("expirationDate")
+            
+            # 2. Fix sameSite values
+            if "sameSite" in sc:
+                ss = sc["sameSite"]
+                if ss == "no_restriction":
+                    sc["sameSite"] = "None"
+                elif ss is None:
+                    # Remove null sameSite to allow defaults
+                    del sc["sameSite"]
+                elif isinstance(ss, str):
+                    # Capitalize valid values: lax -> Lax, strict -> Strict
+                    capitalized = ss.capitalize()
+                    if capitalized in ["Lax", "Strict", "None"]:
+                         sc["sameSite"] = capitalized
+                    else:
+                        del sc["sameSite"]
+            
+            # 3. Clean unsupported keys (Playwright is strict sometimes)
+            keys_to_remove = ["hostOnly", "session", "firstPartyDomain", "partitionKey", "storeId", "id"]
+            for k in keys_to_remove:
+                if k in sc:
+                    del sc[k]
+                    
+            sanitized.append(sc)
+        return sanitized
+
     async def create_project_and_key(self, cookies: List[Dict]) -> Dict:
         """
         Flow:
@@ -36,7 +70,8 @@ class CloudAutomator:
             await stealth.apply_stealth_async(context)
             
             # 1. Load Cookies
-            await context.add_cookies(cookies)
+            clean_cookies = self._sanitize_cookies(cookies)
+            await context.add_cookies(clean_cookies)
             page = await context.new_page()
 
             try:
