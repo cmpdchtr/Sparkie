@@ -80,6 +80,9 @@ async def upload_account(payload: AccountUpload, db: AsyncSession = Depends(get_
         new_account = GoogleAccount(email=payload.email, cookies_json=cookies_str)
         db.add(new_account)
     
+    await db.commit()
+    return {"status": "stored", "email": payload.email}
+
 def run_automation_in_thread(cookies: List[Dict], headless: bool) -> Dict:
     """
     Runs Playwright interactions in a separate thread with a ProactorEventLoop on Windows.
@@ -114,7 +117,8 @@ async def run_generation_task(account_id: int):
             
             # Offload blocking IO (thread creation + automation) to a thread
             # that manages its own robust Event Loop
-            result_data = await asyncio.to_thread(run_automation_in_thread, cookies, True)
+            # headless=False to allow user to see the browser
+            result_data = await asyncio.to_thread(run_automation_in_thread, cookies, False)
             
             # Save results
             new_project = CloudProject(

@@ -1,8 +1,13 @@
 import json
 import asyncio
+import logging
 from typing import Dict, List
 from playwright.async_api import async_playwright, BrowserContext, Page, TimeoutError
 from playwright_stealth import Stealth
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class CloudAutomator:
     """
@@ -51,13 +56,12 @@ class CloudAutomator:
     async def create_project_and_key(self, cookies: List[Dict]) -> Dict:
         """
         Flow:
-        1. Login via Cookies
-        2. Create New Project
-        3. Enable Gemini API
-        4. Create API Key
+        1. Login via Cookies to AI Studio
+        2. Handle Terms of Service (if new account)
+        3. Create API Key > Create in new project
+        4. Extract Key
         """
         async with async_playwright() as p:
-            # Launch User Agent to look like a real browser
             browser = await p.chromium.launch(headless=self.headless, args=["--disable-blink-features=AutomationControlled"])
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -65,35 +69,33 @@ class CloudAutomator:
                 locale='en-US'
             )
             
-            # Apply stealth scripts to evade basic bot detection
             stealth = Stealth()
             await stealth.apply_stealth_async(context)
             
-            # 1. Load Cookies
             clean_cookies = self._sanitize_cookies(cookies)
             await context.add_cookies(clean_cookies)
             page = await context.new_page()
 
             try:
-                # 2. Go to proper console URL to check login
-                print("Checking session...")
-                await page.goto("https://console.cloud.google.com/", timeout=60000)
+                logger.info("Navigating to AI Studio API Key page...")
+                await page.goto("https://aistudio.google.com/app/apikey", timeout=60000)
                 
+                # Check for login redirect
                 if "accounts.google.com/signin" in page.url:
+                    logger.error("Session invalid. Redirected to login page.")
                     raise Exception("Cookies invalid or session expired. Manual login required.")
 
-                # 3. Create Project
-                print("Creating Project...")
-                project_id = await self._create_project(page)
+                # Handle potential onboarding / ToS
+                await self._handle_onboarding(page)
+
+                # Create Key
+                logger.info("Starting Key Generation...")
+                api_key = await self._generate_key_aistudio(page)
                 
-                # 4. Enable API
-                print("Enabling Gemini API...")
-                await self._enable_api(page, project_id)
-                
-                # 5. Create Credentials
-                print("Generating Key...")
-                api_key = await self._create_api_key(page, project_id)
-                
+                # We don't get a visible project ID easily in this flow, 
+                # but valid key is what matters. We can assign a placeholder.
+                project_id = "aistudio-auto-gen" 
+
                 return {
                     "project_id": project_id,
                     "api_key": api_key,
@@ -101,114 +103,110 @@ class CloudAutomator:
                 }
 
             except Exception as e:
-                # Screenshot on failure for debugging
-                await page.screenshot(path="error_screenshot.png")
+                logger.error(f"Automation caught exception: {e}")
+                await page.screenshot(path="error_aistudio_final.png")
+                logger.info("Saved error_aistudio_final.png")
                 raise e
             finally:
+                logger.info("Closing browser...")
                 await browser.close()
 
-    async def _create_project(self, page: Page) -> str:
-        unique_id = f"sparkie-gen-{int(asyncio.get_event_loop().time())}"
-        
-        # Navigate directly to project creation wizard
-        await page.goto("https://console.cloud.google.com/projectcreate")
-        
-        # Wait for form load
-        await page.wait_for_selector("input[name='name']", state="visible")
-        
-        # Fill Project Name
-        await page.fill("input[name='name']", unique_id)
-        
-        # Wait for checking potential availability (GCP does async validation)
-        await page.wait_for_timeout(2000)
-
-        # Click Create
-        # Usually looking for a button with text "Create" is fairly safe
-        create_btn = page.locator("button:has-text('Create')").first
-        await create_btn.click()
-        
-        # Wait for the creation operation. 
-        # Upon success, GCP usually redirects to the Dashboard or shows a notification.
-        # We'll wait a significant amount of time for the background process.
-        print(f"Waiting for project {unique_id} to be provisioned...")
-        await page.wait_for_timeout(25000) 
-        
-        # We assume the ID is the same as the name we requested, 
-        # although GCP might convert it to lowercase-kebab-case automatically.
-        return unique_id
-
-    async def _enable_api(self, page: Page, project_id: str):
-        # Direct link to API library usually works best to bypass Search UI
-        url = f"https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com?project={project_id}"
-        await page.goto(url)
-        
+    async def _handle_onboarding(self, page: Page):
+        """Handles 'Terms of Service' or 'Get Started' prompts if they appear."""
         try:
-            # Check for 'Enable' button. 
-            # If 'Manage' or 'API Enabled' is there, we are good.
-            enable_btn = page.locator("button:has-text('Enable')")
+            # Check for generic "Consent" or "Terms" headers
+            # Often appearing in a modal or overlay
+            # Example: "I agree to the Generative AI Additional Terms of Service"
             
-            # fast allow to check if visible without throwing immediately
-            if await enable_btn.is_visible(timeout=5000):
-                await enable_btn.click()
-                print("Clicked Enable...")
-                # Wait for the enabling spinner
-                await page.wait_for_selector("button:has-text('Manage')", timeout=60000)
+            # Wait briefly to see if we are blocked
+            await page.wait_for_load_state("networkidle", timeout=5000)
+
+            # Check for ToS Checkbox
+            checkbox = page.locator("mat-checkbox") 
+            # Very generic, but usually only one on the consent screen
+            
+            if await checkbox.count() > 0 and await page.locator("text=Terms of Service").is_visible():
+                logger.info("ToS Screen detected. Accepting...")
+                
+                # Check all checkboxes (sometimes there are 2: ToS and Email updates)
+                for cb in await checkbox.all():
+                    if not await cb.is_checked():
+                        await cb.click()
+                        await page.wait_for_timeout(500)
+                
+                # Look for "Continue" or "Next" button
+                btns = ["button:has-text('Continue')", "button:has-text('Agree')", "button:has-text('Next')"]
+                for b in btns:
+                    if await page.locator(b).is_visible():
+                        await page.click(b)
+                        logger.info(f"Clicked {b}")
+                        break
+                
+                await page.wait_for_timeout(3000) # Wait for transition
             else:
-                print("API likely already enabled.")
-        except Exception as e:
-             print(f"Note: API enable step had issues or was already done: {e}")
+                logger.info("No obvious ToS screen detected. Proceeding...")
 
-    async def _create_api_key(self, page: Page, project_id: str) -> str:
-        # Navigate to Credentials page directly
-        url = f"https://console.cloud.google.com/apis/credentials?project={project_id}"
-        await page.goto(url)
+        except Exception as e:
+            logger.warning(f"Onboarding check skipped or failed (non-fatal): {e}")
+
+    async def _generate_key_aistudio(self, page: Page) -> str:
+        # 1. Find 'Create API key' button
+        # Usually checking for the main action button
+        create_btn = page.locator("button:has-text('Create API key')")
         
-        # 1. Click "Create Credentials" (top toolbar usually)
-        # Using a more specific selector by text + icon proximity or role is better usually
-        # But text is the specific fallback
-        await page.click("text=Create Credentials")
+        # Sometimes there's a prompt 'Get API key'
+        if not await create_btn.is_visible():
+             create_btn = page.locator("button:has-text('Get API key')")
+
+        if not await create_btn.is_visible(timeout=10000):
+            # It might be captured in a different UI state or already have keys
+            # Try searching loosely
+            pass
+
+        logger.info("Clicking Create API Key...")
+        await create_btn.first.click()
+
+        # 2. Wait for the Options Modal "Create API key in new project"
+        # It might also just create it if no projects exist, but usually asks.
         
-        # 2. Select "API Key" from the dropdown
-        await page.click("text=API key")
-        
-        # 3. Modal appears with the new key.
-        # It usually has a class like 'mat-dialog-container' or similar, but text extraction is best.
-        # We look for the input field or code block containing the key.
-        
-        # Wait for the modal header
-        await page.wait_for_selector("text=API key created", timeout=30000)
-        
-        # The key is usually in a copy-able text area or specific weird angular element.
-        # We can try to locate it by the 'Copy' button proximity or simply the content.
-        # This is the most brittle part. 
-        # Let's try to get the text content of the element displaying the key.
-        # Usually it's in a code or span close to user's eye.
-        
-        # Attempt to grab the key value
-        # Strategy: Find the input that holds the key or the text block.
-        # Taking a gamble on standard Material Design structure for "Copy to clipboard" parents.
-        # Usually there is only 1 visible API key string in this modal.
-        
-        # This selector looks for a cell/container that likely has the key
-        # Assuming the key starts with "AIza" is a strong heuristic for Google Keys.
         try:
-             # Wait a sec for animation
-            await page.wait_for_timeout(2000)
+            # Look for the specific option to create in a NEW project
+            # This avoids selecting an existing one by mistake
+            new_proj_btn = page.locator("text=Create API key in new project")
+            await new_proj_btn.wait_for(state="visible", timeout=10000)
+            logger.info("Selecting 'Create in new project'...")
+            await new_proj_btn.click()
+        except TimeoutError:
+            logger.warning("Did not see 'Create in new project' option. Maybe it auto-created?")
+            # If we don't see the option, maybe it just went straight to creation (if 0 projects)
+            pass
+
+        # 3. Wait for Key Display
+        logger.info("Waiting for key generation...")
+        
+        # The key is usually shown in a copyable text field or code block
+        # Valid pattern: AIza...
+        
+        # We'll wait for the text to appear
+        try:
+            # Wait for any element containing the pattern
+            # Using a regex-based locator is powerful here
+            key_locator = page.locator("text=/AIza[0-9A-Za-z\\-_]{35}/")
+            await key_locator.wait_for(state="visible", timeout=60000)
             
-            # Crude scraper: Get all text from the dialog and regex it, 
-            # or find the specific element.
-            dialog = page.locator("div[role='dialog']")
-            key_text = await dialog.inner_text()
+            key_text = await key_locator.inner_text()
             
+            # Clean up if it grabbed surrounding text
             import re
             match = re.search(r"AIza[0-9A-Za-z\-_]{35}", key_text)
             if match:
-                return match.group(0)
+                key = match.group(0)
+                logger.info(f"Key generated: {key[:10]}...")
+                return key
             else:
-                 raise Exception("Could not verify key pattern (AIza...) in dialog")
+                raise Exception("Found text but regex failed to extract API key")
 
         except Exception as e:
-             print(f"Failed to extract key from dialog: {e}")
-             # Fallback: maybe just return a marker so we know to check screenshot
-             await page.screenshot(path=f"failed_key_{project_id}.png")
-             raise e
+            await page.screenshot(path="debug_key_generation_failed.png")
+            logger.error(f"Failed to find key: {e}")
+            raise
